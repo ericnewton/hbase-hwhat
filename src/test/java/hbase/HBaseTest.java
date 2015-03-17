@@ -16,6 +16,9 @@
  */
 package hbase;
 
+import static org.junit.Assert.assertEquals;
+
+import java.io.File;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -24,9 +27,12 @@ import java.util.List;
 import java.util.Set;
 import java.util.TreeSet;
 
+import org.apache.commons.io.FileUtils;
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.hbase.HBaseConfiguration;
 import org.apache.hadoop.hbase.HColumnDescriptor;
 import org.apache.hadoop.hbase.HTableDescriptor;
+import org.apache.hadoop.hbase.MiniHBaseCluster;
 import org.apache.hadoop.hbase.TableName;
 import org.apache.hadoop.hbase.client.Admin;
 import org.apache.hadoop.hbase.client.Connection;
@@ -37,18 +43,44 @@ import org.apache.hadoop.hbase.client.ResultScanner;
 import org.apache.hadoop.hbase.client.Scan;
 import org.apache.hadoop.hbase.client.Table;
 import org.apache.hadoop.hbase.util.Bytes;
+import org.apache.hadoop.hbase.zookeeper.MiniZooKeeperCluster;
+import org.junit.After;
+import org.junit.Before;
+import org.junit.Test;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 public class HBaseTest {
   private static final Logger log = LoggerFactory.getLogger(HBaseTest.class);
 
-  public static void main(String[] args) throws Exception {
-    Configuration conf = new Configuration(false);
-    conf.addResource("/usr/local/lib/hadoop/etc/hadoop/core-site.xml");
-    conf.addResource("/usr/local/lib/hadoop/etc/hadoop/hdfs-site.xml");
-    conf.addResource("/usr/local/lib/hbase/conf/hbase-site.xml");
+  Configuration conf;
+  MiniZooKeeperCluster zk;
+  MiniHBaseCluster cluster;
 
+  @Before
+  public void setUp() throws Exception {
+    conf = HBaseConfiguration.create();
+    String tmpDir = System.getProperty("user.dir") + "/target/mini-hbase";
+    FileUtils.deleteDirectory(new File(tmpDir));
+    conf.set("hbase.rootdir", "file://" + tmpDir);
+    zk = new MiniZooKeeperCluster();
+    int zkPort = zk.startup(new File(tmpDir, "zookeeper"));
+    conf.setInt("hbase.zookeeper.property.clientPort", zkPort);
+    conf.set("hbase.master", "local");
+    conf.setInt("hbase.regionserver.info.port", -1);
+    cluster = new MiniHBaseCluster(conf, 2);
+    conf.set("hbase.master", cluster.getMaster().getServerName().getHostAndPort());
+  }
+
+  @After
+  public void tearDown() throws Exception {
+    cluster.shutdown();
+    zk.shutdown();
+  }
+
+
+  @Test
+  public void tenMillionTest() throws Exception {
     final boolean NUKE_TABLE = true, WRITE_DATA = true, READ_DATA = true;
     final int NUM_ROWS = 1000 * 1000;
     final int NUM_COLS = 10;
@@ -81,11 +113,12 @@ public class HBaseTest {
     }
 
     if (WRITE_DATA) {
-      try (Table table = conn.getTable(tableName)) {
+      Table table = conn.getTable(tableName);
+      try {
         table.setWriteBufferSize(1024 * 1024 * 50);
         System.out.println("Write buffer size: " + table.getWriteBufferSize());
 
-        List<Put> puts = new ArrayList<>();
+        List<Put> puts = new ArrayList<Put>();
         // Write 1M rows * 10 columns = 10M k-v pairs
         for (int i = 0; i < NUM_ROWS; i++) {
           rowsWritten.add(i);
@@ -127,14 +160,15 @@ public class HBaseTest {
         }
 
         log.info("Wrote {} entries in total", entriesWritten);
+      } finally {
+        log.info("Closing table used for writes");
+        table.close();
       }
-
-      log.info("Closing table used for writes");
     }
-
     if (READ_DATA) {
-      try (Table table = conn.getTable(tableName)) {
-        TreeSet<Integer> rows = new TreeSet<>();
+      Table table = conn.getTable(tableName);
+      try {
+        TreeSet<Integer> rows = new TreeSet<Integer>();
         long rowsObserved = 0l;
         long entriesObserved = 0l;
         Scan s = new Scan();
@@ -153,7 +187,6 @@ public class HBaseTest {
           }
           while (result.advance()) {
             entriesObserved++;
-            // result.current();
           }
         }
         log.info("Last row in Result {}", row);
@@ -165,7 +198,10 @@ public class HBaseTest {
         rowsWritten.removeAll(rows);
         String toString = rowsWritten.toString();
         int len = Math.min(5000, toString.length());
-        log.info("Missing {} rows: {}{}", new Object[] {rowsWritten.size(), toString.substring(0, len), (len == toString.length() ? "" : "...")});
+        log.error("Missing {} rows: {}{}", new Object[] {rowsWritten.size(), toString.substring(0, len), (len == toString.length() ? "" : "...")});
+        assertEquals(0, rowsWritten.size());
+      } finally {
+        table.close();
       }
     }
   }
